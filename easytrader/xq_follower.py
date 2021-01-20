@@ -22,6 +22,7 @@ class XueQiuFollower(BaseFollower):
     def __init__(self):
         super().__init__()
         self._adjust_sell = None
+        self._adjust_buy = None
         self._users = None
 
     def login(self, user=None, password=None, **kwargs):
@@ -53,6 +54,7 @@ class XueQiuFollower(BaseFollower):
         total_assets=10000,
         initial_assets=None,
         adjust_sell=False,
+        adjust_buy=False,
         track_interval=10,
         trade_cmd_expire_seconds=120,
         cmd_cache=True,
@@ -88,6 +90,7 @@ class XueQiuFollower(BaseFollower):
         )
 
         self._adjust_sell = adjust_sell
+        self._adjust_buy = adjust_buy
 
         self._users = self.warp_list(users)
 
@@ -125,10 +128,14 @@ class XueQiuFollower(BaseFollower):
         if total_assets is None and initial_assets is not None:
             net_value = self._get_portfolio_net_value(strategy_url)
             total_assets = initial_assets * net_value
+        if total_assets is None and initial_assets is None:
+            user = self._users[0]
+            total_assets = user.balance["总资产"]
         if not isinstance(total_assets, Number):
             raise TypeError("input assets type must be number(int, float)")
         if total_assets < 1e3:
             raise ValueError("雪球总资产不能小于1000元，当前预设值 {}".format(total_assets))
+
         return total_assets
 
     @staticmethod
@@ -170,7 +177,7 @@ class XueQiuFollower(BaseFollower):
     def project_transactions(self, transactions, assets):
         for transaction in transactions:
             weight_diff = self.none_to_zero(transaction["weight"]) - self.none_to_zero(
-                transaction["prev_weight"]
+                transaction["prev_weight_adjusted"]
             )
 
             initial_amount = abs(weight_diff) / 100 * assets / transaction["price"]
@@ -184,12 +191,17 @@ class XueQiuFollower(BaseFollower):
             transaction["action"] = "buy" if weight_diff > 0 else "sell"
 
             transaction["amount"] = int(round(initial_amount, -2))
+
             if transaction["action"] == "sell" and self._adjust_sell:
                 transaction["amount"] = self._adjust_sell_amount(
-                    transaction["stock_code"], transaction["amount"]
+                    transaction["stock_code"], transaction["amount"], transaction
+                )
+            if transaction["action"] == "buy" and self._adjust_buy:
+                transaction["amount"] = self._adjust_buy_amount(
+                    transaction, transaction["stock_code"], transaction["amount"], transaction["price"], assets
                 )
 
-    def _adjust_sell_amount(self, stock_code, amount):
+    def _adjust_sell_amount(self, stock_code, amount, transcation):
         """
         根据实际持仓值计算雪球卖出股数
           因为雪球的交易指令是基于持仓百分比，在取近似值的情况下可能出现不精确的问题。
@@ -203,19 +215,24 @@ class XueQiuFollower(BaseFollower):
         :return: 考虑实际持仓之后的卖出股份数
         :rtype: int
         """
+        if amount == 0:
+            return 0
         stock_code = stock_code[-6:]
-        user = self._users[0]
-        position = user.position
+        if stock_code == "511880":
+            return 0
         try:
+            user = self._users[0]
+            position = user.position
             stock = next(s for s in position if s["证券代码"] == stock_code)
         except StopIteration:
-            logger.info("根据持仓调整 %s 卖出额，发现未持有股票 %s, 不做任何调整", stock_code, stock_code)
-            return amount
+            logger.info("根据持仓调整 %s 卖出额，发现未持有股票 %s, 默认为此次调仓无效", stock_code, stock_code)
+            return 0
 
         available_amount = stock["可用余额"]
+        if transcation['weight'] == 0:
+            return available_amount
         if available_amount >= amount:
             return amount
-
         adjust_amount = available_amount // 100 * 100
         logger.info(
             "股票 %s 实际可用余额 %s, 指令卖出股数为 %s, 调整为 %s",
@@ -225,6 +242,69 @@ class XueQiuFollower(BaseFollower):
             adjust_amount,
         )
         return adjust_amount
+
+    def _adjust_buy_amount(self, transcation, stock_code, amount, price, assets):
+        if amount == 0:
+            return amount
+        price = price * ( 1 + self.slippage)
+        stock_code = stock_code[-6:]
+        # 511880这个是货币基金，买入这个相当于无效调仓
+        if stock_code == "511880":
+            return 0
+        user = self._users[0]
+        balance = user.balance
+
+        # weight是5的倍数，且diff小于3.5，则认为是无效调仓
+        # weight不是5的倍数
+        # 进行下面的判断
+        #  判断账户的仓位realWeight是否大于weight，
+        #  如果realWeight >= weight，无效调仓
+        #  如果realWeight < weight，则weight先往上靠，得到新的5的倍数仓位adjustWeight，实际调仓为adjustWeight - realWeight
+        weight = transcation['weight']
+        diff = weight
+        try:
+            diff = weight - transcation['prev_weight_adjusted']
+        except Exception as e:
+            logger.info("错误 %s", e)
+            diff = weight
+        if weight % 5 == 0 and diff < 3.5:
+            return 0
+        if weight % 5 != 0:
+            try:
+                position = user.position
+                stock = next(s for s in position if s["证券代码"] == stock_code)
+                # 有持仓
+                realWeight = round(stock['市值'] / assets, 2) * 100
+                logger.info("原有持仓 %s", realWeight)
+                if realWeight >= weight:
+                    logger.info("股票名称 %s: 已有持仓为 %s, 目标调仓为 %s, 已有仓位大于目标调仓, 放弃调仓", stock['证券名称'], realWeight, weight)
+                    return 0
+                else:
+                    adjustWeight = (weight // 5 + 1) * 5
+                    planDiff = adjustWeight - realWeight
+
+                    # 这个地方可能因为前面没有获取到最新持仓，导致多次产生过大错误调仓
+                    # 从15调整到20以下，一般就是调仓5
+                    if transcation['prev_target_weight'] % 5 == 0:
+                        diff = 5 if planDiff > 7.5 else planDiff
+                        logger.info("股票名称 %s: 已有持仓为 %s, 目标调仓为 %s, 计划调仓是 %s, 调整为 %s", stock['证券名称'], realWeight, weight, planDiff, diff)
+                    else:
+                        # 从15以上，20以下开始调仓，就不用调了
+                        logger.info("调仓起点为 %s, 不是5的倍数, 放弃此次调仓", transcation['prev_target_weight'])
+                        return 0
+            except StopIteration as e:
+                logger.info("错误 %s", e)
+                # 没有相关持仓
+                diff = (diff // 5 + 1) * 5
+                logger.info("原有持仓为0，调整为 %s", diff)
+            amount = diff * assets / price // 100 // 100 * 100
+        can_use_balance = balance["可用金额"]
+        buy_balance = amount * price
+        if can_use_balance < buy_balance:
+            amount = int(can_use_balance/price) // 100 * 100
+            real_buy_balance = amount * price
+            logger.info( "账户实际可用余额 %s, 指令买入金额为 %s, 调整为买入 %s", can_use_balance, buy_balance, real_buy_balance)
+        return amount
 
     def _get_portfolio_info(self, portfolio_code):
         """
