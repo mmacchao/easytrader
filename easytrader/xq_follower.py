@@ -48,17 +48,17 @@ class XueQiuFollower(BaseFollower):
         logger.info("登录成功")
 
     def follow(  # type: ignore
-        self,
-        users,
-        strategies,
-        total_assets=10000,
-        initial_assets=None,
-        adjust_sell=False,
-        adjust_buy=False,
-        track_interval=10,
-        trade_cmd_expire_seconds=120,
-        cmd_cache=True,
-        slippage: float = 0.0,
+            self,
+            users,
+            strategies,
+            total_assets=10000,
+            initial_assets=None,
+            adjust_sell=False,
+            adjust_buy=False,
+            track_interval=10,
+            trade_cmd_expire_seconds=120,
+            cmd_cache=True,
+            slippage: float = 0.0,
     ):
         """跟踪 joinquant 对应的模拟交易，支持多用户多策略
         :param users: 支持 easytrader 的用户对象，支持使用 [] 指定多个用户
@@ -163,6 +163,21 @@ class XueQiuFollower(BaseFollower):
 
         return transactions
 
+    # 仅测试用
+    # def extract_transactions(self, history):
+    #     if history["count"] <= 0:
+    #         return []
+    #     transactions = []
+    #     for item in history["list"]:
+    #         # rebalancing_index = 0
+    #         raw_transactions = item["rebalancing_histories"]
+    #         for transaction in raw_transactions:
+    #             if transaction["price"] is None:
+    #                 logger.info("该笔交易无法获取价格，疑似未成交，跳过。交易详情: %s", transaction)
+    #                 continue
+    #             transactions.append(transaction)
+    #     return transactions
+
     def create_query_transaction_params(self, strategy):
         params = {"cube_symbol": strategy, "page": 1, "count": 1}
         return params
@@ -194,14 +209,14 @@ class XueQiuFollower(BaseFollower):
 
             if transaction["action"] == "sell" and self._adjust_sell:
                 transaction["amount"] = self._adjust_sell_amount(
-                    transaction["stock_code"], transaction["amount"], transaction
+                    transaction["stock_code"], transaction["amount"], transaction, assets
                 )
             if transaction["action"] == "buy" and self._adjust_buy:
                 transaction["amount"] = self._adjust_buy_amount(
                     transaction, transaction["stock_code"], transaction["amount"], transaction["price"], assets
                 )
 
-    def _adjust_sell_amount(self, stock_code, amount, transcation):
+    def _adjust_sell_amount(self, stock_code, amount, transcation, assets):
         """
         根据实际持仓值计算雪球卖出股数
           因为雪球的交易指令是基于持仓百分比，在取近似值的情况下可能出现不精确的问题。
@@ -225,34 +240,53 @@ class XueQiuFollower(BaseFollower):
             position = user.position
             stock = next(s for s in position if s["证券代码"] == stock_code)
         except StopIteration:
-            logger.info("根据持仓调整 %s 卖出额，发现未持有股票 %s, 默认为此次调仓无效", stock_code, stock_code)
+            logger.info("卖：指令时间：%s 根据持仓调整 %s 卖出额，发现未持有股票 %s, 调仓无效。", transcation["datetime"], transcation["stock_name"],
+                        transcation["stock_name"])
             return 0
 
         available_amount = stock["可用余额"]
-        if transcation['weight'] == 0:
+        totalMoney = stock["市值"]
+        # 策略调仓到0，那直接全买
+
+        if self.none_to_zero(transcation['weight']) == 0:
+            # 当天不可卖仓位
+            leftWeight = round(stock["冻结数量"] * stock["市价"] / assets, 2)
+            logger.info("卖：指令时间：%s 股票：%s 策略从 %s 调仓到 %s, 清空股票, 账户当前股票仓位为 %s， 不可买仓位为 %s", transcation["datetime"],
+                        transcation["stock_name"], transcation["prev_target_weight"], transcation["weight"],
+                        round(totalMoney / assets * 100, 2), leftWeight)
             return available_amount
         if available_amount >= amount:
-            return amount
+            currentWeight = round(totalMoney/assets * 100, 2)
+            diff = self.none_to_zero(transcation["prev_target_weight"]) - self.none_to_zero(transcation["weight"])
+            logger.info("卖：指令时间：%s 股票：%s 策略从 %s 调仓到 %s, 账户当前股票仓位为 %s, 卖出仓位 %s, 剩余仓位 %s",
+                        transcation["datetime"],
+                        transcation["stock_name"],
+                        transcation["prev_target_weight"],
+                        transcation["weight"],
+                        currentWeight,
+                        diff,
+                        currentWeight - diff )
+            return amount // 100 * 100
         adjust_amount = available_amount // 100 * 100
         logger.info(
-            "股票 %s 实际可用余额 %s, 指令卖出股数为 %s, 调整为 %s",
-            stock_code,
+            "卖：指令时间：%s 股票 %s 实际可用余额 %s, 指令卖出股数为 %s, 调整为 %s。",
+            transcation["datetime"],
+            transcation["stock_name"],
             available_amount,
             amount,
-            adjust_amount,
+            adjust_amount
         )
         return adjust_amount
 
-    def _adjust_buy_amount(self, transcation, stock_code, amount, price, assets):
+    def _adjust_buy_amount(self, transaction, stock_code, amount, price, assets):
         if amount == 0:
             return amount
-        price = price * ( 1 + self.slippage)
+        price = price * (1 + self.slippage)
         stock_code = stock_code[-6:]
         # 511880这个是货币基金，买入这个相当于无效调仓
         if stock_code == "511880":
             return 0
         user = self._users[0]
-        balance = user.balance
 
         # weight是5的倍数，且diff小于3.5，则认为是无效调仓
         # weight不是5的倍数
@@ -260,50 +294,61 @@ class XueQiuFollower(BaseFollower):
         #  判断账户的仓位realWeight是否大于weight，
         #  如果realWeight >= weight，无效调仓
         #  如果realWeight < weight，则weight先往上靠，得到新的5的倍数仓位adjustWeight，实际调仓为adjustWeight - realWeight
-        weight = transcation['weight']
-        diff = weight
-        try:
-            diff = weight - transcation['prev_weight_adjusted']
-        except Exception as e:
-            logger.info("错误 %s", e)
-            diff = weight
+        weight = self.none_to_zero(transaction['weight'])
+        prevWeight = self.none_to_zero(transaction["prev_weight_adjusted"])
+        diff = weight - prevWeight
+        # diff小于3.5，且不是调仓到5的整数倍，大概率就是微调，直接放弃
         if weight % 5 == 0 and diff < 3.5:
+            logger.info("买：指令时间：%s 股票名称 %s: 策略调仓从 %s 调到 %s, 调仓幅度 %s, 小于3.5丢弃。", transaction["datetime"], transaction["stock_name"], prevWeight,
+                        weight, diff)
             return 0
-        if weight % 5 != 0:
+        # 0 -> 5, 0 -> 10, 10 -> 15, 10 -> 20 都不会进来，直接就买了
+        # 10 -> 11, 11 -> 15, 11 -> 16, 11 -> 20 都要进来和实际值比较一下
+        if weight % 5 != 0 or (self.none_to_zero(transaction["prev_weight"]) % 5 != 0 and diff >= 4):
             try:
                 position = user.position
                 stock = next(s for s in position if s["证券代码"] == stock_code)
                 # 有持仓
                 realWeight = round(stock['市值'] / assets, 2) * 100
-                logger.info("原有持仓 %s", realWeight)
                 if realWeight >= weight:
-                    logger.info("股票名称 %s: 已有持仓为 %s, 目标调仓为 %s, 已有仓位大于目标调仓, 放弃调仓", stock['证券名称'], realWeight, weight)
+                    logger.info("买：指令时间：%s 股票名称 %s: 策略从 %s 调仓到 %s,策略调仓幅度 %s, 已有持仓为 %s, 已有仓位大于策略目标调仓, 放弃调仓。",
+                                transaction["datetime"], stock['证券名称'], prevWeight, weight, diff, realWeight)
                     return 0
                 else:
+                    # 以5为台阶往上靠
                     adjustWeight = (weight // 5 + 1) * 5
-                    planDiff = adjustWeight - realWeight
-
+                    diff = adjustWeight - realWeight
+                    # 防止未知原因导致的调仓过大
+                    diff = 10 if diff > 10 else diff
                     # 这个地方可能因为前面没有获取到最新持仓，导致多次产生过大错误调仓
                     # 从15调整到20以下，一般就是调仓5
-                    if transcation['prev_target_weight'] % 5 == 0:
-                        diff = 5 if planDiff > 7.5 else planDiff
-                        logger.info("股票名称 %s: 已有持仓为 %s, 目标调仓为 %s, 计划调仓是 %s, 调整为 %s", stock['证券名称'], realWeight, weight, planDiff, diff)
-                    else:
-                        # 从15以上，20以下开始调仓，就不用调了
-                        logger.info("调仓起点为 %s, 不是5的倍数, 放弃此次调仓", transcation['prev_target_weight'])
-                        return 0
-            except StopIteration as e:
-                logger.info("错误 %s", e)
+                    # if transaction['prev_target_weight'] % 5 == 0:
+                    #     diff = 5 if planDiff > 7.5 else planDiff
+                    #     logger.info("股票名称 %s: 已有持仓为 %s, 目标调仓为 %s, 计划调仓是 %s, 调整为 %s", stock['证券名称'], realWeight, weight, planDiff, diff)
+                    # else:
+                    #     # 从15以上，20以下开始调仓，就不用调了
+                    #     logger.info("调仓起点为 %s, 不是5的倍数, 放弃此次调仓", transaction['prev_target_weight'])
+                    #     return 0
+            except StopIteration:
                 # 没有相关持仓
                 diff = (diff // 5 + 1) * 5
-                logger.info("原有持仓为0，调整为 %s", diff)
+                logger.info("买：指令时间：%s 股票名称：%s, 策略从 %s 调仓到 %s 策略调仓幅度 %s, 原有持仓为0，调整为 %s。",
+                            transaction["datetime"],
+                            transaction["stock_name"],
+                            prevWeight, weight, weight - prevWeight,
+                            diff)
             amount = diff * assets / price // 100 // 100 * 100
-        can_use_balance = balance["可用金额"]
+
+        if weight % 5 == 0 and diff > 4:
+            logger.info("买：指令时间：%s 股票名称 %s: 策略从 %s 调仓到 %s,策略调仓幅度 %s, 调仓为5的倍数, 为节约时间，不进行账户仓位查询了",
+                        transaction["datetime"], transaction["stock_name"], prevWeight, weight, diff)
+        can_use_balance = user.balance["可用金额"]
         buy_balance = amount * price
         if can_use_balance < buy_balance:
-            amount = int(can_use_balance/price) // 100 * 100
+            amount = int(can_use_balance / price) // 100 * 100
             real_buy_balance = amount * price
-            logger.info( "账户实际可用余额 %s, 指令买入金额为 %s, 调整为买入 %s", can_use_balance, buy_balance, real_buy_balance)
+            logger.info("买：指令时间：%s 股票名称：%s 账户实际可用余额 %s, 指令买入金额为 %s, 调整为买入 %s。", transaction["datetime"], transaction["stock_name"],
+                        can_use_balance, buy_balance, real_buy_balance)
         return amount
 
     def _get_portfolio_info(self, portfolio_code):

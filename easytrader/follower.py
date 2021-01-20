@@ -316,6 +316,7 @@ class BaseFollower(metaclass=abc.ABCMeta):
             }
             try:
                 response = getattr(user, trade_cmd["action"])(**args)
+                # response = "测试成功而已"
             except exceptions.TradeError as e:
                 trader_name = type(user).__name__
                 err_msg = "{}: {}".format(type(e).__name__, e.args)
