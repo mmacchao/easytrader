@@ -216,7 +216,7 @@ class XueQiuFollower(BaseFollower):
                     transaction, transaction["stock_code"], transaction["amount"], transaction["price"], assets
                 )
 
-    def _adjust_sell_amount(self, stock_code, amount, transcation, assets):
+    def _adjust_sell_amount(self, stock_code, amount, transaction, assets):
         """
         根据实际持仓值计算雪球卖出股数
           因为雪球的交易指令是基于持仓百分比，在取近似值的情况下可能出现不精确的问题。
@@ -235,34 +235,42 @@ class XueQiuFollower(BaseFollower):
         stock_code = stock_code[-6:]
         if stock_code == "511880":
             return 0
+        weight = self.none_to_zero(transaction['weight'])
+        prevWeight = self.none_to_zero(transaction["prev_weight_adjusted"])
+        # startWeight = round(self.none_to_zero(transaction["prev_weight"]))
+        diff = prevWeight - weight
+        # 5.5 -> 5, 6 -> 5
+        if weight % 5 == 0 and diff < 3.5:
+            return 0
+
         try:
             user = self._users[0]
             position = user.position
             stock = next(s for s in position if s["证券代码"] == stock_code)
         except StopIteration:
-            logger.info("卖：指令时间：%s 根据持仓调整 %s 卖出额，发现未持有股票 %s, 调仓无效。", transcation["datetime"], transcation["stock_name"],
-                        transcation["stock_name"])
+            logger.info("卖：指令时间：%s 根据持仓调整 %s 卖出额，发现未持有股票 %s, 调仓无效。", transaction["datetime"], transaction["stock_name"],
+                        transaction["stock_name"])
             return 0
 
         available_amount = stock["可用余额"]
         totalMoney = stock["市值"]
         # 策略调仓到0，那直接全买
 
-        if self.none_to_zero(transcation['weight']) == 0:
+        if self.none_to_zero(transaction['weight']) == 0:
             # 当天不可卖仓位
             leftWeight = round(stock["冻结数量"] * stock["市价"] / assets, 2)
-            logger.info("卖：指令时间：%s 股票：%s 策略从 %s 调仓到 %s, 清空股票, 账户当前股票仓位为 %s， 不可买仓位为 %s", transcation["datetime"],
-                        transcation["stock_name"], transcation["prev_target_weight"], transcation["weight"],
+            logger.info("卖：指令时间：%s 股票：%s 策略从 %s -> %s, 清空股票, 账户当前股票仓位为 %s， 不可买仓位为 %s", transaction["datetime"],
+                        transaction["stock_name"], transaction["prev_target_weight"], transaction["weight"],
                         round(totalMoney / assets * 100, 2), leftWeight)
             return available_amount
         if available_amount >= amount:
             currentWeight = round(totalMoney/assets * 100, 2)
-            diff = self.none_to_zero(transcation["prev_target_weight"]) - self.none_to_zero(transcation["weight"])
-            logger.info("卖：指令时间：%s 股票：%s 策略从 %s 调仓到 %s, 账户当前股票仓位为 %s, 卖出仓位 %s, 剩余仓位 %s",
-                        transcation["datetime"],
-                        transcation["stock_name"],
-                        transcation["prev_target_weight"],
-                        transcation["weight"],
+            diff = self.none_to_zero(transaction["prev_target_weight"]) - self.none_to_zero(transaction["weight"])
+            logger.info("卖：指令时间：%s 股票：%s 策略从 %s -> %s, 账户当前股票仓位为 %s, 卖出仓位 %s, 剩余仓位 %s",
+                        transaction["datetime"],
+                        transaction["stock_name"],
+                        transaction["prev_target_weight"],
+                        transaction["weight"],
                         currentWeight,
                         diff,
                         currentWeight - diff )
@@ -270,8 +278,8 @@ class XueQiuFollower(BaseFollower):
         adjust_amount = available_amount // 100 * 100
         logger.info(
             "卖：指令时间：%s 股票 %s 实际可用余额 %s, 指令卖出股数为 %s, 调整为 %s。",
-            transcation["datetime"],
-            transcation["stock_name"],
+            transaction["datetime"],
+            transaction["stock_name"],
             available_amount,
             amount,
             adjust_amount
@@ -286,7 +294,7 @@ class XueQiuFollower(BaseFollower):
         # 511880这个是货币基金，买入这个相当于无效调仓
         if stock_code == "511880":
             return 0
-        user = self._users[0]
+        # user = self._users[0]
 
         # weight是5的倍数，且diff小于3.5，则认为是无效调仓
         # weight不是5的倍数
@@ -296,60 +304,86 @@ class XueQiuFollower(BaseFollower):
         #  如果realWeight < weight，则weight先往上靠，得到新的5的倍数仓位adjustWeight，实际调仓为adjustWeight - realWeight
         weight = self.none_to_zero(transaction['weight'])
         prevWeight = self.none_to_zero(transaction["prev_weight_adjusted"])
+        startWeight = round(self.none_to_zero(transaction["prev_weight"]))
         diff = weight - prevWeight
         # diff小于3.5，且不是调仓到5的整数倍，大概率就是微调，直接放弃
         if weight % 5 == 0 and diff < 3.5:
-            logger.info("买：指令时间：%s 股票名称 %s: 策略调仓从 %s 调到 %s, 调仓幅度 %s, 小于3.5丢弃。", transaction["datetime"], transaction["stock_name"], prevWeight,
-                        weight, diff)
+            # logger.info("买：指令时间：%s 股票名称 %s: 策略调仓从 %s 调到 %s, 调仓幅度 %s, 小于3.5丢弃。", transaction["datetime"], transaction["stock_name"], prevWeight,
+            #             weight, diff)
             return 0
+
+        # 0 -> 1, 5 -> 6
+        if startWeight % 5 == 0 and weight % 5 != 0 and diff < 4.5:
+            diff = 5
+            amount = round(diff / 100 * assets / price, -2)
+            logger.info("买：指令时间：%s 股票名称 %s: 策略从 %s -> %s 改为调仓5，调整后的买入数量为：%s, 买入金额为 %s",
+                        transaction["datetime"], transaction["stock_name"], prevWeight, weight, amount, round(amount * price))
+            return amount
+
+        if weight % 5 != 0 and startWeight % 5 != 0:
+            logger.info("买：指令时间：%s 股票名称 %s: 策略调仓从 %s -> %s, 放弃调仓",
+                        transaction["datetime"], transaction["stock_name"], prevWeight,
+                        weight)
+            return 0
+
+        # 0 -> 5, 11 -> 15, 11 -> 20
+        if weight % 5 == 0 and diff >= 4:
+            logger.info("买：指令时间：%s 股票名称 %s: 策略从 %s -> %s, 按实际值进行调仓",
+                        transaction["datetime"], transaction["stock_name"], prevWeight, weight)
+
+        return amount
+
         # 0 -> 5, 0 -> 10, 10 -> 15, 10 -> 20 都不会进来，直接就买了
         # 10 -> 11, 11 -> 15, 11 -> 16, 11 -> 20 都要进来和实际值比较一下
-        if weight % 5 != 0 or (self.none_to_zero(transaction["prev_weight"]) % 5 != 0 and diff >= 4):
-            try:
-                position = user.position
-                stock = next(s for s in position if s["证券代码"] == stock_code)
-                # 有持仓
-                realWeight = round(stock['市值'] / assets, 2) * 100
-                if realWeight >= weight:
-                    logger.info("买：指令时间：%s 股票名称 %s: 策略从 %s 调仓到 %s,策略调仓幅度 %s, 已有持仓为 %s, 已有仓位大于策略目标调仓, 放弃调仓。",
-                                transaction["datetime"], stock['证券名称'], prevWeight, weight, diff, realWeight)
-                    return 0
-                else:
-                    # 以5为台阶往上靠
-                    adjustWeight = (weight // 5 + 1) * 5
-                    diff = adjustWeight - realWeight
-                    # 防止未知原因导致的调仓过大
-                    diff = 10 if diff > 10 else diff
-                    # 这个地方可能因为前面没有获取到最新持仓，导致多次产生过大错误调仓
-                    # 从15调整到20以下，一般就是调仓5
-                    # if transaction['prev_target_weight'] % 5 == 0:
-                    #     diff = 5 if planDiff > 7.5 else planDiff
-                    #     logger.info("股票名称 %s: 已有持仓为 %s, 目标调仓为 %s, 计划调仓是 %s, 调整为 %s", stock['证券名称'], realWeight, weight, planDiff, diff)
-                    # else:
-                    #     # 从15以上，20以下开始调仓，就不用调了
-                    #     logger.info("调仓起点为 %s, 不是5的倍数, 放弃此次调仓", transaction['prev_target_weight'])
-                    #     return 0
-            except StopIteration:
-                # 没有相关持仓
-                diff = (diff // 5 + 1) * 5
-                logger.info("买：指令时间：%s 股票名称：%s, 策略从 %s 调仓到 %s 策略调仓幅度 %s, 原有持仓为0，调整为 %s。",
-                            transaction["datetime"],
-                            transaction["stock_name"],
-                            prevWeight, weight, weight - prevWeight,
-                            diff)
-            amount = diff * assets / price // 100 // 100 * 100
 
-        if weight % 5 == 0 and diff > 4:
-            logger.info("买：指令时间：%s 股票名称 %s: 策略从 %s 调仓到 %s,策略调仓幅度 %s, 调仓为5的倍数, 为节约时间，不进行账户仓位查询了",
-                        transaction["datetime"], transaction["stock_name"], prevWeight, weight, diff)
-        can_use_balance = user.balance["可用金额"]
-        buy_balance = amount * price
-        if can_use_balance < buy_balance:
-            amount = int(can_use_balance / price) // 100 * 100
-            real_buy_balance = amount * price
-            logger.info("买：指令时间：%s 股票名称：%s 账户实际可用余额 %s, 指令买入金额为 %s, 调整为买入 %s。", transaction["datetime"], transaction["stock_name"],
-                        can_use_balance, buy_balance, real_buy_balance)
-        return amount
+        # if weight % 5 != 0 or (startWeight % 5 != 0 and diff >= 4):
+        #     try:
+        #         position = user.position
+        #         stock = next(s for s in position if s["证券代码"] == stock_code)
+        #         # 有持仓
+        #         realWeight = round(stock['市值'] / assets, 2) * 100
+        #         if realWeight >= weight:
+        #             logger.info("买：指令时间：%s 股票名称 %s: 策略从 %s 调仓到 %s,策略调仓幅度 %s, 已有持仓为 %s, 已有仓位大于策略目标调仓, 放弃调仓。",
+        #                         transaction["datetime"], stock['证券名称'], prevWeight, weight, diff, realWeight)
+        #             return 0
+        #         else:
+        #             # 以5为台阶往上靠
+        #             adjustWeight = (weight // 5 + 1) * 5
+        #             diff = adjustWeight - realWeight
+        #             # 防止未知原因导致的调仓过大
+        #             diff = 10 if diff > 10 else diff
+        #             # 这个地方可能因为前面没有获取到最新持仓，导致多次产生过大错误调仓
+        #             # 从15调整到20以下，一般就是调仓5
+        #             # if transaction['prev_target_weight'] % 5 == 0:
+        #             #     diff = 5 if planDiff > 7.5 else planDiff
+        #             #     logger.info("股票名称 %s: 已有持仓为 %s, 目标调仓为 %s, 计划调仓是 %s, 调整为 %s", stock['证券名称'], realWeight, weight, planDiff, diff)
+        #             # else:
+        #             #     # 从15以上，20以下开始调仓，就不用调了
+        #             #     logger.info("调仓起点为 %s, 不是5的倍数, 放弃此次调仓", transaction['prev_target_weight'])
+        #             #     return 0
+        #     except StopIteration:
+        #         # 没有相关持仓
+        #         diff = (diff // 5 + 1) * 5
+        #         logger.info("买：指令时间：%s 股票名称：%s, 策略从 %s 调仓到 %s 策略调仓幅度 %s, 原有持仓为0，调整为 %s。",
+        #                     transaction["datetime"],
+        #                     transaction["stock_name"],
+        #                     prevWeight, weight, weight - prevWeight,
+        #                     diff)
+        #     amount = diff * assets / price // 100 // 100 * 100
+
+        # if weight % 5 == 0 and diff >= 4:
+        #     logger.info("买：指令时间：%s 股票名称 %s: 策略从 %s 调仓到 %s,策略调仓幅度 %s, 调仓幅度大于4且目标仓位是5的倍数, 为节约时间，不进行账户仓位查询了",
+        #                 transaction["datetime"], transaction["stock_name"], prevWeight, weight, diff)
+
+        # 测试把可用余额这一段去了，看下能不能加快交易进度
+        # can_use_balance = user.balance["可用金额"]
+        # buy_balance = amount * price
+        # if can_use_balance < buy_balance:
+        #     amount = int(can_use_balance / price) // 100 * 100
+        #     real_buy_balance = amount * price
+        #     logger.info("买：指令时间：%s 股票名称：%s 账户实际可用余额 %s, 指令买入金额为 %s, 调整为买入 %s。", transaction["datetime"], transaction["stock_name"],
+        #                 can_use_balance, buy_balance, real_buy_balance)
+        # return amount
 
     def _get_portfolio_info(self, portfolio_code):
         """

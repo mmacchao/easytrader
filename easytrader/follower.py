@@ -199,15 +199,16 @@ class BaseFollower(metaclass=abc.ABCMeta):
                 }
                 if self.is_cmd_expired(trade_cmd):
                     continue
-                logger.info(
-                    "策略 [%s] 发送指令到交易队列, 股票: %s 动作: %s 数量: %s 价格: %s 信号产生时间: %s",
-                    name,
-                    trade_cmd["stock_code"],
-                    trade_cmd["action"],
-                    trade_cmd["amount"],
-                    trade_cmd["price"],
-                    trade_cmd["datetime"],
-                )
+                if trade_cmd["amount"] != 0:
+                    logger.info(
+                        "策略 [%s] 发送指令到交易队列, 股票: %s 动作: %s 数量: %s 价格: %s 信号产生时间: %s",
+                        name,
+                        trade_cmd["stock_code"],
+                        trade_cmd["action"],
+                        trade_cmd["amount"],
+                        trade_cmd["price"],
+                        trade_cmd["datetime"],
+                    )
                 self.trade_queue.put(trade_cmd)
                 self.add_cmd_to_expired_cmds(trade_cmd)
             try:
@@ -219,11 +220,11 @@ class BaseFollower(metaclass=abc.ABCMeta):
 
     @staticmethod
     def generate_expired_cmd_key(cmd):
-        return "{}_{}_{}_{}_{}_{}".format(
+        return "{}_{}_{}_{}_{}".format(
             cmd["strategy_name"],
             cmd["stock_code"],
             cmd["action"],
-            cmd["amount"],
+            # cmd["amount"], # 不考虑数量，因为有时候账户金额不够后，会导致同一个指令，可买数量不同
             cmd["price"],
             cmd["datetime"],
         )
