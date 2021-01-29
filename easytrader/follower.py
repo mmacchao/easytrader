@@ -123,7 +123,7 @@ class BaseFollower(metaclass=abc.ABCMeta):
             return price * (1 + self.slippage)
         if action == "sell":
             return price * (1 - self.slippage)
-        return price
+        return round(price, 2)
 
     def load_expired_cmd_cache(self):
         if os.path.exists(self.CMD_CACHE_FILE):
@@ -366,6 +366,26 @@ class BaseFollower(metaclass=abc.ABCMeta):
         transactions = self.extract_transactions(history)
         self.project_transactions(transactions, **kwargs)
         return self.order_transactions_sell_first(transactions)
+
+    def custom_query_strategy_transaction(self, strategy, page):
+        params = {"cube_symbol": strategy, "page": page, "count": 50}
+        rep = self.s.get(self.TRANSACTION_API, params=params)
+        history = rep.json()
+        time.sleep(1)
+        try:
+            if history["count"] <= 0:
+                return []
+        except Exception:
+            return []
+        transactions = []
+        for item in history["list"]:
+            raw_transactions = item["rebalancing_histories"]
+            for transaction in raw_transactions:
+                if transaction["price"] is None:
+                    # logger.info("该笔交易无法获取价格，疑似未成交，跳过。交易详情: %s", transaction)
+                    continue
+                transactions.append(transaction)
+        return transactions
 
     def extract_transactions(self, history) -> List[str]:
         """

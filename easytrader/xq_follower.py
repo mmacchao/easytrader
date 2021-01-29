@@ -23,6 +23,7 @@ class XueQiuFollower(BaseFollower):
         super().__init__()
         self._adjust_sell = None
         self._adjust_buy = None
+        self._expire_seconds = 60
         self._users = None
 
     def login(self, user=None, password=None, **kwargs):
@@ -91,6 +92,7 @@ class XueQiuFollower(BaseFollower):
 
         self._adjust_sell = adjust_sell
         self._adjust_buy = adjust_buy
+        self._expire_seconds = trade_cmd_expire_seconds
 
         self._users = self.warp_list(users)
 
@@ -143,6 +145,7 @@ class XueQiuFollower(BaseFollower):
         return strategy_url
 
     def extract_strategy_name(self, strategy_url):
+        return '一蓑烟雨任平生'
         base_url = "https://xueqiu.com/cubes/nav_daily/all.json?cube_symbol={}"
         url = base_url.format(strategy_url)
         rep = self.s.get(url)
@@ -158,6 +161,13 @@ class XueQiuFollower(BaseFollower):
         for transaction in raw_transactions:
             if transaction["price"] is None:
                 logger.info("该笔交易无法获取价格，疑似未成交，跳过。交易详情: %s", transaction)
+                continue
+            trans_date = datetime.fromtimestamp(
+                transaction["created_at"] // 1000
+            )
+            now = datetime.now()
+            expire = (now - trans_date).total_seconds()
+            if expire > self._expire_seconds:
                 continue
             transactions.append(transaction)
 
@@ -230,6 +240,7 @@ class XueQiuFollower(BaseFollower):
         :return: 考虑实际持仓之后的卖出股份数
         :rtype: int
         """
+        return 0
         if amount == 0:
             return 0
         stock_code = stock_code[-6:]
@@ -239,7 +250,7 @@ class XueQiuFollower(BaseFollower):
         prevWeight = self.none_to_zero(transaction["prev_weight_adjusted"])
         # startWeight = round(self.none_to_zero(transaction["prev_weight"]))
         diff = prevWeight - weight
-        # 5.5 -> 5, 6 -> 5
+        # 微小调仓，忽略 5.5 -> 5, 6 -> 5
         if weight % 5 == 0 and diff < 3.5:
             return 0
 
@@ -251,10 +262,20 @@ class XueQiuFollower(BaseFollower):
             logger.info("卖：指令时间：%s 根据持仓调整 %s 卖出额，发现未持有股票 %s, 调仓无效。", transaction["datetime"], transaction["stock_name"],
                         transaction["stock_name"])
             return 0
+        except Exception as e:
+            logger.info("未知错误：%s", e)
+            return 0
 
         available_amount = stock["可用余额"]
+        logger.info("卖：指令时间：%s 股票：%s 策略从 %s -> %s, 清空股票",
+                    transaction["datetime"],
+                    transaction["stock_name"],
+                    transaction["prev_target_weight"],
+                    transaction["weight"])
+        return available_amount
+
         totalMoney = stock["市值"]
-        # 策略调仓到0，那直接全买
+        # 策略调仓到0，那直接全卖
 
         if self.none_to_zero(transaction['weight']) == 0:
             # 当天不可卖仓位
@@ -294,6 +315,7 @@ class XueQiuFollower(BaseFollower):
         # 511880这个是货币基金，买入这个相当于无效调仓
         if stock_code == "511880":
             return 0
+
         # user = self._users[0]
 
         # weight是5的倍数，且diff小于3.5，则认为是无效调仓
@@ -306,6 +328,14 @@ class XueQiuFollower(BaseFollower):
         prevWeight = self.none_to_zero(transaction["prev_weight_adjusted"])
         startWeight = round(self.none_to_zero(transaction["prev_weight"]))
         diff = weight - prevWeight
+        # 新开仓, 直接半仓买入
+        if startWeight == 0:
+            amount = round(assets / 2 / price, -2)
+            logger.info("买：指令时间：%s 股票名称 %s: 策略从 %s -> %s，改为买入半仓，数量 %s, 金额为 %s",
+                        transaction["datetime"], transaction["stock_name"], prevWeight, weight, amount,
+                        round(amount * price))
+            return amount
+        return 0
         # diff小于3.5，且不是调仓到5的整数倍，大概率就是微调，直接放弃
         if weight % 5 == 0 and diff < 3.5:
             # logger.info("买：指令时间：%s 股票名称 %s: 策略调仓从 %s 调到 %s, 调仓幅度 %s, 小于3.5丢弃。", transaction["datetime"], transaction["stock_name"], prevWeight,
