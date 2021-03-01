@@ -4,5 +4,11 @@ pyinstaller -D demo/ht_test.py --noconfirm
 
 # 安装venv环境
 python -m venv venv
+# 打开目录，执行安装
+cd venv/Scripts
+activate.bat
+pip install -r requirement.txt
 
-切换到 venv/Scripts, 执行activate.bat，然后执行 pip install ../../requirements.txt安装依赖
+pip install pypiwin32
+
+# 切换到 venv/Scripts, 执行activate.bat，然后执行 pip install ../../requirements.txt安装依赖

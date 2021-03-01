@@ -14,8 +14,7 @@ user.prepare(
 
 # 跟踪雪球组合
 xq_follower = easytrader.follower('xq')
-xq_follower.login(
-    cookies='')
+xq_follower.login(cookies='')
 # 总金额50万 下单时浮动2个点
 xq_follower.follow(
     user,
@@ -23,14 +22,14 @@ xq_follower.follow(
     # 'ZH2358246', # 君临
     # 'ZH2342584',  # 生叔
     # total_assets=1000,
-    total_assets=700000,
+    total_assets=600000,
     initial_assets=None,
     # initial_assets=1000000,
-    track_interval=5,
+    track_interval=3,
     slippage=0.02,
     adjust_sell=True,
     adjust_buy=True,
     # send_interval=5,
-    trade_cmd_expire_seconds=120,
+    trade_cmd_expire_seconds=30,
     cmd_cache=True
 )
